@@ -1,75 +1,57 @@
-# cuTile Evaluation Harness for Conversation-Driven Skill Evolution
+# cuTile Evaluation Harness: Direct Extraction vs Multi-Turn Skill Evolution
 
 **Date:** 2026-03-20
-**Status:** Draft (v2 — TileGym-based)
+**Status:** Draft (v3 — two-method comparison)
 **Author:** Kaix + Claude
 
 ## Problem Statement
 
-We built conversation-driven skill evolution into MetaClaw (skills extracted from user corrections, iterated via feedback). We need a concrete, measurable evaluation: does the system actually improve an agent's performance through conversation-driven skill learning?
+We built conversation-driven skill evolution into MetaClaw. We need to evaluate whether it works — and specifically whether the multi-turn feedback loop adds value over simple one-shot skill extraction.
 
-cuTile kernel coding provides the test domain. **TileGym** (31 cuTile kernel implementations + 100+ test cases) serves as the training ground for skill evolution. The **compute-eval benchmark** (48 cuTile problems) serves as the held-out test set.
+cuTile kernel coding provides the test domain. **TileGym** (31 cuTile kernel implementations) is the skill source. **compute-eval** (48 cuTile problems) is the held-out test.
 
-## Design Goals
+## Research Question
 
-- Exercise the **full conversation pipeline**: `ConversationSignalDetector` → `SignalAggregator` → `SkillEvolver` → `SkillManager`
-- **Train/test separation**: learn skills from TileGym, evaluate on compute-eval
-- Two-phase skill extraction: study code (Phase A) + solve-and-check (Phase B)
-- Measure pass rate improvement on compute-eval with skill attribution
-- Configurable rounds (default: single, option for multi-round convergence)
-- Locally testable (skill evolution) without GPU/cluster
+Does iterative, conversation-driven skill evolution outperform one-shot skill extraction for improving an LLM agent's cuTile kernel coding ability — without any model training?
 
-## Approach
+## Experimental Design
 
-Python orchestrator inside `MetaClaw/eval/cutile/` with three phases:
+Three conditions, same compute-eval benchmark:
 
-1. **Phase A (Study):** LLM reads TileGym kernel implementations, generates teaching summaries → explicit skill extraction via conversation pipeline
-2. **Phase B (Practice):** Agent attempts to re-implement TileGym kernels from test specs, gets corrected against reference → implicit correction-driven skill refinement
-3. **Phase C (Evaluate):** Evolved skills injected into compute-eval benchmark solve → measure pass rate vs baseline
+```
+Method                    Skill Source    Feedback Loop?   Expected
+──────────────────────────────────────────────────────────────────
+No skills (control)       None            No               X/48
+Method 1: Direct extract  TileGym         No               Y/48
+Method 2: Multi-turn      TileGym         Yes              Z/48
+```
+
+Both methods are training-free (LLM API calls only). The comparison isolates the value of the conversation-driven feedback loop.
 
 ---
 
-## Architecture Overview
+## Method 1: Direct Extraction (Baseline)
+
+One-shot skill generation. LLM reads TileGym kernels, produces skills, done.
+
+### Process
 
 ```
-MetaClaw/eval/cutile/
-├── run_eval.py              # Main orchestrator (entry point)
-├── phase_a_study.py         # Read TileGym code, generate teaching summaries
-├── phase_b_practice.py      # Solve-and-check against TileGym references
-├── phase_c_evaluate.py      # Run compute-eval benchmark with evolved skills
-├── failure_analyzer.py      # Parse eval results, extract error context
-├── correction_simulator.py  # Generate corrections from reference comparison
-├── skill_writer.py          # Write/merge skills for injection
-├── report.py                # Per-round and cross-round comparison reports
-└── README.md                # Usage instructions
-```
+For each of 31 TileGym kernels:
+  1. Read kernel implementation + test file
+  2. LLM generates a teaching summary (one call per kernel)
+  3. Feed through ConversationSignalDetector → explicit_save
+  4. SignalAggregator triggers → SkillEvolver synthesizes skills
 
-**Data sources:**
-- TileGym: `/home/scratch.kaix_coreai/workspace/MemSkill/MetaClaw/TileGym/`
-  - Kernel implementations: `src/tilegym/ops/cutile/` (31 files)
-  - Test files: `tests/ops/test_*.py` (20 files, ~100+ parametrized cases)
-  - Operation interfaces: `src/tilegym/ops/ops.py`
-- compute-eval: via `cutile-eval-kit/` shell wrappers (48 problems, B200 Docker eval)
-
----
-
-## Phase A: Study TileGym Code → Extract Initial Skills
-
-The LLM reads each TileGym kernel implementation and generates a "teaching summary" — a natural language description of the cuTile patterns used. These summaries flow through the full conversation signal detection pipeline.
-
-### Input per kernel
-
-```python
-kernel_source = read_file("src/tilegym/ops/cutile/softmax.py")
-test_source = read_file("tests/ops/test_softmax.py")
+Output: skill bank (written to disk)
+No re-attempts, no corrections, no iteration.
 ```
 
 ### Teaching summary generation
 
 ```python
 teaching_prompt = f"""
-You are a cuTile expert writing a teaching note for a student who will
-implement GPU kernels using the cuTile Python DSL.
+You are a cuTile expert writing a teaching note for a student.
 
 Study this kernel implementation and its tests:
 
@@ -84,57 +66,61 @@ Tests:
 ```
 
 Write a concise teaching note (3-5 sentences) explaining the key cuTile
-patterns and API usage in this kernel. Start with "Remember this:" to
-make it clear this is a skill to save. Be specific about ct.* API calls,
-tile sizes, and hardware features (TMA, tensor cores) used.
+patterns and API usage. Start with "Remember this:" to make it clear
+this is a skill to save. Be specific about ct.* API calls, tile sizes,
+and hardware features (TMA, tensor cores).
 """
-
-teaching_message = call_llm(teaching_prompt)
-# e.g. "Remember this: when implementing softmax in cuTile, use ct.load
-#        with use_tma=True for rows larger than 1024 elements. Use the
-#        chunked approach for smaller rows. Always compute ct.max first
-#        to subtract the maximum before ct.exp to avoid overflow."
 ```
 
-### Feed through conversation pipeline
+### Signal flow
 
 ```python
 turn_data = {
-    "session_id": f"tilegym-study-{kernel_name}",
+    "session_id": f"direct-extract-{kernel_name}",
     "turn_num": 1,
     "user_message": teaching_message,      # "Remember this: ..." → explicit_save
-    "assistant_response": kernel_source,    # The kernel being studied
+    "assistant_response": kernel_source,
     "active_skills": [],
 }
-signals = detector.detect(turn_data)       # explicit_save detected
+signals = detector.detect(turn_data)
 aggregator.add(signals)
-# explicit_save triggers immediately → evolve
 ```
 
-### Expected output
+After all 31 kernels, SkillEvolver synthesizes across all signals → **~10-20 skills**.
 
-After studying all 31 kernels: **~10-20 initial skills** covering cuTile patterns (API usage, hardware features, algorithmic patterns). The SkillEvolver synthesizes across multiple teaching summaries, merging related patterns into general skills rather than creating one skill per kernel.
+### Cost
+
+- 31 LLM calls (teaching summaries) + 1 evolution call
+- ~5 minutes, no GPU
 
 ---
 
-## Phase B: Solve-and-Check → Refine Skills
+## Method 2: Multi-Turn Skill Evolution (Proposed)
 
-The agent attempts to implement each TileGym kernel given only its test file as specification. When the attempt differs from the reference, a correction is generated and fed through the conversation pipeline.
+Iterative feedback loop. Agent attempts kernels, gets corrected, skills evolve, agent re-attempts with evolved skills.
 
-### Problem format
+### Process
 
-For each of the 31 TileGym kernels:
+```
+Phase A (Study): Same as Method 1 → initial skill bank
 
-**Given to the agent:**
-- Test file (e.g., `tests/ops/test_softmax.py`) — defines inputs, expected outputs, tolerances
-- Current evolved skills (from Phase A + previous iterations)
+Phase B (Practice), per round:
+  For each of 31 TileGym kernels:
+    1. Agent attempts implementation given only the test file + current skills
+    2. Compare attempt vs reference implementation
+    3. If wrong: LLM generates correction → ConversationSignalDetector → implicit_correction
+    4. After all kernels: corrections clustered → SkillEvolver evolves
+    5. Re-attempt failed kernels with evolved skills (next round)
 
-**NOT given:**
-- The reference implementation (`src/tilegym/ops/cutile/softmax.py`)
+  Stop when: no new corrections, or --rounds limit
 
-**Agent task:** Write the cuTile kernel implementation that passes the tests.
+Phase C (Evaluate): Same benchmark for both methods
+```
 
-### Solve attempt
+### Phase B detail: Solve-and-check
+
+**Given to agent:** test file + current skills
+**NOT given:** reference implementation
 
 ```python
 solve_prompt = f"""
@@ -145,21 +131,19 @@ Test specification:
 {test_source}
 ```
 
+{current_skills_text}
+
 Write the cuTile kernel implementation that passes these tests.
-Use the ct.* API (ct.kernel, ct.launch, ct.load, ct.store, etc.).
-Write only the implementation code.
 """
 
 agent_solution = call_llm(solve_prompt)
 ```
 
-### Compare against reference
+### Phase B detail: Correction generation
 
 ```python
-reference = read_file(f"src/tilegym/ops/cutile/{kernel_name}.py")
-
 comparison_prompt = f"""
-Compare this student's cuTile kernel attempt with the reference implementation.
+Compare this student's cuTile kernel with the reference.
 
 Student attempt:
 ```python
@@ -171,85 +155,104 @@ Reference (correct):
 {reference[:1000]}
 ```
 
-If the student's code has errors or uses wrong patterns, write a short
-correction (2-3 sentences). Start with "No, that's wrong." and explain
-what should be done differently. Be specific about cuTile API usage.
+If wrong, write a correction (2-3 sentences). Start with "No, that's wrong."
+Be specific about cuTile API usage.
+Do NOT use "always", "never", "from now on", or "remember this".
 
-If the student's code is essentially correct, respond with just "CORRECT".
+If correct, respond with just "CORRECT".
 """
-
-comparison = call_llm(comparison_prompt)
 ```
 
-### Correction flow (only when wrong)
+### Phase B detail: Correction clustering
 
-```python
-if comparison.strip() != "CORRECT":
-    turn_data = {
-        "session_id": f"tilegym-practice-round{round}-{kernel_name}",
-        "turn_num": 1,
-        "user_message": comparison,             # "No, that's wrong. ..."
-        "assistant_response": agent_solution,    # The wrong attempt
-        "active_skills": current_skill_names,
-    }
-    signals = detector.detect(turn_data)         # implicit_correction detected
-    aggregator.add(signals)
-```
-
-### Evolution trigger
-
-After processing all 31 kernels (or when correction threshold met):
-
-```python
-if aggregator.should_evolve():
-    consumed = aggregator.consume()
-    actions = await evolver.evolve(consumed, skill_manager.skills)
-    # SkillEvolver sees all corrections together → synthesizes patterns
-    # e.g., "5 corrections about using built-in ct.* ops instead of manual loops"
-    #      → creates skill "prefer-builtin-ct-ops"
-    for action in actions:
-        if action.action == "create":
-            skill_manager.add_skill(action.skill)
-        elif action.action == "update":
-            skill_manager.update_skill(action.skill["name"], action.skill)
-```
-
-### Multi-round iteration (configurable)
+Before feeding to SkillEvolver, group corrections by error pattern (simple keyword matching):
 
 ```
-Round 1: Agent attempts all 31 kernels with Phase A skills only
-  → corrections extracted → skills evolved
-Round 2: Agent re-attempts failed kernels with Round 1 skills
-  → corrections extracted → skills further refined
-Round N: Until no new corrections or --rounds limit reached
+20 corrections → 4-5 clusters:
+  Cluster A: "used manual loops instead of ct.* builtins" (6)
+  Cluster B: "wrong tile shapes for tensor cores" (4)
+  Cluster C: "missing TMA configuration" (3)
+  Cluster D: "incorrect memory layout / transpose" (3)
+  Cluster E: "miscellaneous API misuse" (4)
 ```
 
-### Correction simulation: Avoiding explicit detection mismatch
+### Phase B detail: Contrastive diagnosis
 
-The `ConversationSignalDetector` skips implicit detection when an explicit pattern matches. The LLM correction prompt must avoid explicit-save trigger words.
+For each cluster, the SkillEvolver LLM sees:
+1. Agent's wrong attempts
+2. Corrections
+3. **Which skills were active when these failures happened**
 
-**Constraint in correction prompt:** The prompt says "Start with 'No, that's wrong.'" which ensures the implicit correction pattern matches. The prompt does NOT use "always", "never", "from now on", "remember this".
+This enables three distinct diagnoses:
+- Skills **MISSING** → create new skill
+- Skill **PRESENT but WRONG** → update that skill
+- Skill **PRESENT but IGNORED** → make skill more specific/forceful
 
-**Fallback:** If the LLM-generated correction doesn't trigger detection:
-```python
-if not detector.detect(turn_data):
-    turn_data["user_message"] = f"No, that's wrong. {comparison}"
-    signals = detector.detect(turn_data)
+### Phase B detail: Conversational evolution
+
+The evolution itself is a multi-turn conversation (not a single LLM call):
+
 ```
+Turn 1 (system): "Your agent failed 6 kernels with manual loops.
+                  Skills active: [prefer-builtin-ct-ops]. Corrections: [...]"
+
+Turn 2 (evolver): "I'll split prefer-builtin-ct-ops into two specific skills:
+                   use-ct-matmul-for-gemm and use-ct-sum-for-reduction"
+
+Turn 3 (system): [re-attempt results] "Agent now passes 4/6. Still fails
+                  2 — uses ct.sum but wrong axis."
+
+Turn 4 (evolver): "Updated use-ct-sum-for-reduction with axis guidance."
+```
+
+Each round of Phase B's re-attempt loop is also a turn in the evolution conversation. The evolver learns from seeing its own skills succeed or fail.
+
+### Phase B detail: Reflection cycle
+
+After proposing skills, one reflection round (from MemSkill's Designer):
+
+```
+"You proposed 'prefer-builtin-ct-ops'. Is this specific enough?
+ Would the agent know WHICH builtins for WHICH patterns?"
+→ LLM refines, possibly splits into parent + children skills
+```
+
+### Phase B detail: Re-attempt and second-order corrections
+
+Agent re-attempts only previously failed kernels with new skills:
+
+| Outcome | Meaning | Evolution action |
+|---------|---------|-----------------|
+| Now passes | Skill worked | Boost confidence |
+| Same error | Skill ineffective | Correction includes "you have skill X but still failed" → update |
+| Different error | Partially helped | New correction → may need additional skill |
+
+"Still fails with same error" produces **second-order corrections** — the system learns from its own skill evolution failures.
+
+### Phase B detail: Convergence
+
+Stop when:
+- All kernels pass (converged)
+- Same corrections repeat for 2 consecutive rounds (plateaued)
+- `--rounds` limit reached
+
+### Cost
+
+- Phase A: same as Method 1 (~32 LLM calls)
+- Phase B per round: up to 31 solve + 31 compare + clustering + evolution conversation (~70 LLM calls)
+- 2-3 rounds typical → ~180-250 LLM calls total
+- ~30 minutes, no GPU
 
 ---
 
-## Phase C: Evaluate on Compute-Eval Benchmark
-
-All evolved skills from Phases A+B are tested on the held-out 48 cuTile problems.
+## Evaluation (Phase C) — Same for Both Methods
 
 ### Skill injection
 
-`skill_writer.py` concatenates base cuTile skill + all evolved skills into a single flat markdown file (the eval kit's generator accepts one `--skill-md` file):
+`skill_writer.py` concatenates base cuTile skill + all evolved skills into one flat markdown file:
 
 ```python
 def write_merged_skill(base_skill_path, evolved_skills, output_path):
-    """Concatenate base cuTile skill + all evolved skills into one file."""
     parts = [Path(base_skill_path).read_text()]
     parts.append("\n\n---\n\n# Evolved Skills (learned from TileGym)\n")
     for skill in evolved_skills:
@@ -257,182 +260,199 @@ def write_merged_skill(base_skill_path, evolved_skills, output_path):
     Path(output_path).write_text("\n".join(parts))
 ```
 
-### Evaluation execution
+Passed as `SKILL_MD=.../cutile-skill-merged.md` to the eval kit's generator script.
+
+### Benchmark execution
 
 ```bash
-# Baseline (no evolved skills):
-env MODEL=$model SKILL_MD=$base_skill \
-  bash $eval_kit_dir/scripts/compute-eval-run-cutile-opencode-gpt52.sh
+# Control (no skills):
+env MODEL=$model SKILL_MD="" bash $eval_kit_dir/scripts/compute-eval-run-cutile-opencode-gpt52.sh
 
-# With evolved skills:
-env MODEL=$model SKILL_MD=$merged_skill \
-  bash $eval_kit_dir/scripts/compute-eval-run-cutile-opencode-gpt52.sh
+# Method 1 (direct extraction):
+env MODEL=$model SKILL_MD=$method1_skills bash $eval_kit_dir/scripts/...
+
+# Method 2 (multi-turn):
+env MODEL=$model SKILL_MD=$method2_skills bash $eval_kit_dir/scripts/...
 ```
 
 ### Reading results
 
-The eval script writes graded results to `$RUN_ROOT/eval-output/` with a dynamic filename `*-graded-solutions.jsonl`. The orchestrator finds it via:
-
+Eval script writes `*-graded-solutions.jsonl` to `$RUN_ROOT/eval-output/`:
 ```python
-import glob
 graded = sorted(glob.glob(f"{run_root}/eval-output/*-graded-solutions.jsonl"))[-1]
 ```
 
-Agent solutions are in `$RUN_ROOT/workspaces/<task_id>/` and packed into `$OUTPUT_DIR/<release>-<model>-solutions.tar.gz`.
-
 ---
 
-## Reporting and Skill Attribution
+## Reporting
 
-### Per-round data
-
-```json
-{
-  "round": 1,
-  "phase_a_skills": 15,
-  "phase_b_corrections": 18,
-  "phase_b_skills_evolved": 5,
-  "total_skills": 20,
-  "compute_eval_pass_rate": "28/48",
-  "per_task": {
-    "cutile/0": {"status": "passed", "active_skills": ["softmax-tma-loading", "prefer-builtin-ct-ops"]},
-    "cutile/1": {"status": "failed", "error_type": "compile", "error": "..."}
-  }
-}
-```
-
-### Cross-round comparison
+### Primary result table
 
 ```
-=== cuTile Skill Evolution Report ===
+Method                    Pass   Fail   Skip   Delta vs Control
+──────────────────────────────────────────────────────────────
+No skills (control)       20     25      3     —
+Method 1: Direct extract  Y      ...     3     +Y-20
+Method 2: Multi-turn      Z      ...     3     +Z-20
+```
 
-Phase A: 15 skills extracted from studying 31 TileGym kernels
-Phase B: 5 additional skills from solve-and-check corrections
+### Per-problem flip analysis
 
-       Pass  Fail  Skip  Source
-Base   20    25     3    cutile-minimal-skill.md only
-+A     25    20     3    + Phase A skills (study)
-+A+B   28    17     3    + Phase B skills (practice)
-+A+B×2 31    14     3    + Phase B round 2 refinement
-
+```
 Flips (fail→pass):
-  Base→+A:    cutile/3, cutile/7, cutile/12, cutile/22, cutile/31
-  +A→+A+B:   cutile/5, cutile/15, cutile/40
-  +A+B→+A+B×2: cutile/19, cutile/33, cutile/44
+  Control → Method 1: cutile/3, cutile/7, cutile/12
+  Control → Method 2: cutile/3, cutile/7, cutile/12, cutile/5, cutile/15, cutile/40
+  Method 1 only: (none — subset of Method 2)
+  Method 2 only: cutile/5, cutile/15, cutile/40 (these required iterative refinement)
 
-Skill Attribution:
-  softmax-tma-loading          → cutile/3, cutile/12 (Phase A)
-  prefer-builtin-ct-ops        → cutile/7, cutile/22, cutile/5 (Phase A+B)
-  tile-shape-tensor-cores      → cutile/31, cutile/15 (Phase A+B)
-  reduction-with-ct-sum        → cutile/40, cutile/19 (Phase B)
+Regressions (pass→fail):
+  (ideally none)
+```
+
+### Skill attribution
+
+```
+Skills from Method 1 (direct extraction):
+  softmax-tma-loading          → cutile/3, cutile/12
+  prefer-builtin-ct-ops        → cutile/7
+
+Additional skills from Method 2 (multi-turn):
+  use-ct-sum-for-reduction     → cutile/5, cutile/40
+  tile-shape-tensor-cores      → cutile/15
+  (these skills required correction feedback to generate —
+   direct extraction missed them)
+```
+
+### Phase B evolution trace
+
+```
+Round 1: 20 corrections → 5 new skills → 12 kernels still failing
+Round 2: 12 corrections → 2 updates + 1 new → 5 kernels still failing
+Round 3: 5 corrections → 1 update → 3 kernels still failing (plateau)
 ```
 
 ### Output files
 
 ```
 results/
-├── phase-a/
-│   ├── teaching-summaries.jsonl    # LLM-generated summaries per kernel
-│   └── evolved-skills/             # Skills from studying code
-├── phase-b/
-│   ├── round-1/
-│   │   ├── attempts.jsonl          # Agent solutions per kernel
-│   │   ├── corrections.jsonl       # Generated corrections
-│   │   └── evolved-skills/         # Skills from corrections
-│   └── round-2/ ...
-├── phase-c/
-│   ├── baseline/
-│   │   └── eval-results.jsonl      # No evolved skills
-│   ├── with-skills/
-│   │   └── eval-results.jsonl      # With evolved skills
-│   └── comparison.json             # Per-task diff
-└── summary.txt                     # Human-readable report (table above)
+├── method-1-direct/
+│   ├── teaching-summaries.jsonl
+│   ├── evolved-skills/
+│   └── compute-eval-results.jsonl
+├── method-2-multiturn/
+│   ├── phase-a/
+│   │   ├── teaching-summaries.jsonl
+│   │   └── evolved-skills/
+│   ├── phase-b/
+│   │   ├── round-1/
+│   │   │   ├── attempts.jsonl
+│   │   │   ├── corrections.jsonl
+│   │   │   ├── evolution-conversation.jsonl
+│   │   │   └── evolved-skills/
+│   │   └── round-2/ ...
+│   └── compute-eval-results.jsonl
+├── control/
+│   └── compute-eval-results.jsonl
+├── comparison.json
+└── summary.txt
 ```
 
 ---
 
-## Configuration and CLI
+## Architecture
+
+```
+MetaClaw/eval/cutile/
+├── run_eval.py              # Main orchestrator
+├── phase_a_study.py         # Read TileGym → teaching summaries → skills
+├── phase_b_practice.py      # Solve-and-check → corrections → evolve → re-attempt
+├── phase_c_evaluate.py      # Run compute-eval benchmark
+├── failure_analyzer.py      # Parse graded-solutions.jsonl
+├── correction_simulator.py  # Generate corrections from reference comparison
+├── correction_clusterer.py  # Group corrections by error pattern
+├── skill_writer.py          # Write/merge skills for injection
+├── report.py                # Comparison reports
+└── README.md
+```
+
+---
+
+## CLI
 
 ```bash
+# Full comparison (all three conditions):
 python eval/cutile/run_eval.py \
-  --rounds 2 \
   --tilegym-dir /path/to/TileGym \
   --eval-kit-dir /path/to/cutile-eval-kit \
   --results-dir eval/cutile/results \
   --model azure/openai/gpt-5.2 \
   --evolver-model gpt-5.2 \
   --base-skill /path/to/cutile-minimal-skill.md \
-  --task-ids ""
-```
+  --rounds 3
 
-**Phases can run independently:**
+# Method 1 only (local, no GPU):
+python eval/cutile/run_eval.py --method direct --tilegym-dir ...
 
-```bash
-# Phase A only (local, no GPU):
-python eval/cutile/run_eval.py --phase a --tilegym-dir ...
-
-# Phase B only (local, no GPU):
-python eval/cutile/run_eval.py --phase b --tilegym-dir ... --skills-from results/phase-a/
+# Method 2 only (local, no GPU for Phase A+B):
+python eval/cutile/run_eval.py --method multiturn --tilegym-dir ... --rounds 3
 
 # Phase C only (needs B200):
-python eval/cutile/run_eval.py --phase c --eval-kit-dir ... --skills-from results/phase-b/round-2/
-```
+python eval/cutile/run_eval.py --method evaluate \
+  --skills-from results/method-2-multiturn/phase-b/round-3/evolved-skills/ \
+  --eval-kit-dir ...
 
-### Local testing mode
-
-```bash
-python eval/cutile/run_eval.py \
-  --local-test \
+# Local test (skip Phase C, use mock results):
+python eval/cutile/run_eval.py --local-test \
   --mock-eval-results path/to/previous/eval-results.jsonl
 ```
 
-Skips Phase C subprocess calls. Uses previous eval results. Tests the full Phase A → Phase B → reporting pipeline without GPU/cluster.
-
-### Task ID handling
-
-When `--task-ids` is empty or omitted, all tasks are run. The orchestrator passes `TASK_IDS=""` (empty string) to subprocess — this is the eval kit's convention for "all tasks". Never pass `None`.
-
 ---
 
-## Integration with Existing Systems
+## Integration
 
-### MetaClaw components used
+### MetaClaw components
 
-All imports from `metaclaw.*`:
-- `ConversationSignalDetector` — detects explicit_save (Phase A) and implicit_correction (Phase B)
-- `SignalAggregator` + `SkillEvolutionConfig` — buffers signals, triggers evolution
-- `SkillEvolver` — LLM-based skill synthesis from signals
-- `SkillManager` — stores/retrieves/updates skills on disk
-- `SkillAction` — create/update/deprecate/link actions
+All from `metaclaw.*`:
+- `ConversationSignalDetector` — explicit_save (Phase A), implicit_correction (Phase B)
+- `SignalAggregator` + `SkillEvolutionConfig` (from `metaclaw.signal_aggregator`)
+- `SkillEvolver` — skill synthesis, conversational evolution in Method 2
+- `SkillManager` — skill storage, confidence tracking, hierarchy
+- `SkillAction` — create/update/deprecate/link
 
-`SkillEvolutionConfig` is imported from `metaclaw.signal_aggregator` (not `metaclaw.config`). The `MetaClawConfig.skill_evolution_config()` helper handles conversion from flat config fields.
+### Eval kit scripts (Phase C only)
 
-### Eval kit scripts called
+Via subprocess:
+- `cutile-eval-kit/scripts/compute-eval-run-cutile-opencode-gpt52.sh`
+- `cutile-eval-kit/scripts/run_b200_local_compute_eval_evalonly.sh`
 
-Via subprocess with env var overrides:
-- `cutile-eval-kit/scripts/compute-eval-run-cutile-opencode-gpt52.sh` — solve + eval
-- `cutile-eval-kit/scripts/run_b200_local_compute_eval_evalonly.sh` — eval-only rerun
+### TileGym (read-only)
 
-### TileGym files read (not modified)
-
-- `TileGym/src/tilegym/ops/cutile/*.py` — reference implementations (31 files)
-- `TileGym/tests/ops/test_*.py` — test specifications (20 files)
+- `TileGym/src/tilegym/ops/cutile/*.py` — 31 kernel implementations
+- `TileGym/tests/ops/test_*.py` — 20 test files
 - `TileGym/src/tilegym/ops/ops.py` — operation interfaces
 
 ---
 
-## Known Code Issues to Fix Before Eval
+## Correction Simulation Constraints
 
-1. **`SkillEvolver.get_update_summary()` key mismatch:** Already fixed — reads both old (`num_skills_generated`) and new (`num_actions_generated`) history record keys.
+The `ConversationSignalDetector` skips implicit detection when an explicit pattern matches. Correction prompts must avoid explicit-save trigger words ("always", "never", "from now on", "remember this").
 
-2. **Correction prompt must avoid explicit-save keywords:** The LLM prompt for generating corrections explicitly forbids "always", "never", "from now on", "remember this" to ensure signals are classified as `implicit_correction` not `explicit_save`.
+Fallback if correction doesn't trigger detection:
+```python
+if not detector.detect(turn_data):
+    turn_data["user_message"] = f"No, that's wrong. {correction_message}"
+```
+
+---
+
+## Task ID Handling
+
+`--task-ids ""` (empty string) means all tasks. The orchestrator passes `TASK_IDS=""` to subprocess. Never pass `None`.
 
 ---
 
 ## Open Questions
 
-1. **LLM cost:** Phase A: 31 teaching summaries + ~15 skill evolution calls. Phase B: up to 31 solve attempts + 31 comparisons + evolution calls per round. Phase C: 0 (just subprocess). Total: ~130 LLM calls per full run. Acceptable?
-
-2. **Solve time for Phase C:** Each compute-eval round takes hours on B200. Multi-round Phase B is local (fast). Only Phase C needs the cluster.
-
-3. **Which TileGym kernels to practice on:** All 31, or a curated subset that best covers the patterns needed for compute-eval problems?
+1. **LLM cost acceptable?** Method 1: ~32 calls. Method 2: ~250 calls. Phase C: 0 (subprocess).
+2. **Which TileGym kernels?** All 31, or a curated subset covering compute-eval patterns?
+3. **Multiple eval runs for statistical significance?** Each compute-eval run has some variance. Run 3x and report mean ± std?
