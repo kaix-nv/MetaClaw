@@ -91,6 +91,14 @@ _CONV_TASK_TYPES = {
 # Frontmatter parser                                                   #
 # ------------------------------------------------------------------ #
 
+def _parse_list(val: str) -> list[str]:
+    """Parse 'a, b, c' or '[a, b, c]' into a list of stripped strings."""
+    if not val:
+        return []
+    val = val.strip().strip("[]")
+    return [v.strip() for v in val.split(",") if v.strip()]
+
+
 def _parse_skill_md(path: str) -> Optional[Dict[str, Any]]:
     """
     Parse a SKILL.md file (directory-based skills format).
@@ -135,6 +143,12 @@ def _parse_skill_md(path: str) -> Optional[Dict[str, Any]]:
         "description": description,
         "category": category,
         "content": body,
+        "parent": fm.get("parent", None) or None,
+        "children": _parse_list(fm.get("children", "")),
+        "confidence": float(fm.get("confidence", 0.6)),
+        "provenance": fm.get("provenance", "manual"),
+        "created_from_session": fm.get("created_from_session", ""),
+        "deprecated": fm.get("deprecated", "false").lower() == "true",
     }
 
 
@@ -350,7 +364,12 @@ class SkillManager:
                 else all_task
             )
 
-        return general + task_skills + common_mistakes
+        combined = general + task_skills + common_mistakes
+        return [
+            s for s in combined
+            if not s.get("deprecated", False)
+            and s.get("confidence", 0.6) >= 0.3
+        ]
 
     def format_for_conversation(self, skills: list[dict]) -> str:
         """Format skill dicts into a block for insertion into a system prompt."""
@@ -438,6 +457,23 @@ class SkillManager:
         fm_lines = [f"name: {name}", f"description: {description}"]
         if category and category != "general":
             fm_lines.append(f"category: {category}")
+        parent = skill.get("parent")
+        if parent:
+            fm_lines.append(f"parent: {parent}")
+        children = skill.get("children", [])
+        if children:
+            fm_lines.append(f"children: {', '.join(children)}")
+        confidence = skill.get("confidence")
+        if confidence is not None and confidence != 0.6:
+            fm_lines.append(f"confidence: {confidence:.2f}")
+        provenance = skill.get("provenance", "manual")
+        if provenance != "manual":
+            fm_lines.append(f"provenance: {provenance}")
+        session = skill.get("created_from_session", "")
+        if session:
+            fm_lines.append(f"created_from_session: {session}")
+        if skill.get("deprecated"):
+            fm_lines.append("deprecated: true")
         fm = "\n".join(fm_lines)
         text = f"---\n{fm}\n---\n\n{content}\n"
         try:
@@ -485,3 +521,71 @@ class SkillManager:
             ),
             "common_mistakes": len(self.skills.get("common_mistakes", [])),
         }
+
+    def get_skill(self, name: str) -> Optional[dict]:
+        """Return the full skill dict by name, or None if not found."""
+        for skill in self._iter_all_skills():
+            if skill.get("name") == name:
+                return skill
+        return None
+
+    def _iter_all_skills(self):
+        """Iterate over all skills across all categories."""
+        yield from self.skills.get("general_skills", [])
+        for cat_skills in self.skills.get("task_specific_skills", {}).values():
+            yield from cat_skills
+        yield from self.skills.get("common_mistakes", [])
+
+    def update_skill(self, name: str, updates: dict) -> bool:
+        """Update an existing skill's fields and persist to disk."""
+        skill = self.get_skill(name)
+        if skill is None:
+            logger.warning("[SkillManager] update_skill: not found: %s", name)
+            return False
+        for key, val in updates.items():
+            if key != "name":
+                skill[key] = val
+        self._skill_embeddings_cache = None
+        self._write_skill_md(skill)
+        logger.info("[SkillManager] updated skill: %s", name)
+        return True
+
+    def deprecate_skill(self, name: str, reason: str = "") -> bool:
+        """Mark a skill as deprecated. Excluded from retrieval but not deleted."""
+        skill = self.get_skill(name)
+        if skill is None:
+            logger.warning("[SkillManager] deprecate_skill: not found: %s", name)
+            return False
+        skill["deprecated"] = True
+        self._skill_embeddings_cache = None
+        self._write_skill_md(skill)
+        logger.info("[SkillManager] deprecated skill: %s (reason: %s)", name, reason)
+        return True
+
+    def adjust_confidence(self, name: str, delta: float) -> None:
+        """Adjust a skill's confidence score, clamped to [0.0, 1.0], and persist."""
+        skill = self.get_skill(name)
+        if skill is None:
+            return
+        current = skill.get("confidence", 0.6)
+        skill["confidence"] = max(0.0, min(1.0, current + delta))
+        self._write_skill_md(skill)
+
+    def link_skills(self, parent_name: str, child_name: str) -> bool:
+        """Create parent-child relationship. Updates both skills and persists."""
+        parent = self.get_skill(parent_name)
+        child = self.get_skill(child_name)
+        if parent is None:
+            logger.warning("[SkillManager] link_skills: parent not found: %s", parent_name)
+            return False
+        if child is None:
+            logger.warning("[SkillManager] link_skills: child not found: %s", child_name)
+            return False
+        children = parent.get("children", [])
+        if child_name not in children:
+            children.append(child_name)
+        parent["children"] = children
+        child["parent"] = parent_name
+        self._write_skill_md(parent)
+        self._write_skill_md(child)
+        return True
