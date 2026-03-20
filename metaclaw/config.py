@@ -64,6 +64,16 @@ class MetaClawConfig:
     max_new_skills: int = 3
 
     # ------------------------------------------------------------------ #
+    # Conversation-driven skill evolution                                  #
+    # ------------------------------------------------------------------ #
+    skill_evolution_sources: str = "conversation,feedback"  # comma-separated
+    skill_evolution_correction_threshold: int = 3
+    skill_evolution_pattern_confidence: float = 0.8
+    skill_evolution_use_llm_detection: bool = True
+    skill_evolution_initial_confidence: float = 0.6
+    skill_evolution_deprecation_threshold: float = 0.3
+
+    # ------------------------------------------------------------------ #
     # Context window                                                       #
     # ------------------------------------------------------------------ #
     max_context_tokens: int = 20000            # hard cap on prompt token count; must match
@@ -198,3 +208,16 @@ class MetaClawConfig:
 
     def training_backend_key(self) -> str:
         return self.resolved_backend_key()
+
+    def skill_evolution_config(self):
+        """Convert flat config fields to a SkillEvolutionConfig instance."""
+        from .signal_aggregator import SkillEvolutionConfig
+        return SkillEvolutionConfig(
+            sources=[s.strip() for s in self.skill_evolution_sources.split(",") if s.strip()],
+            correction_threshold=self.skill_evolution_correction_threshold,
+            pattern_confidence_threshold=self.skill_evolution_pattern_confidence,
+            prm_failure_threshold=self.skill_update_threshold,
+            use_llm_detection=self.skill_evolution_use_llm_detection,
+            initial_confidence=self.skill_evolution_initial_confidence,
+            deprecation_threshold=self.skill_evolution_deprecation_threshold,
+        )
