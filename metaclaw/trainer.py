@@ -23,13 +23,17 @@ import os
 from typing import Optional
 
 from .config import MetaClawConfig
+from .conversation_signal_detector import ConversationSignalDetector
 from .data_formatter import ConversationSample, batch_to_datums, compute_advantages
+from .feedback_collector import FeedbackCollector
 from .openclaw_env_rollout import rollout_loop
 from .prm_scorer import PRMScorer
 from .rollout import AsyncRolloutWorker
 from .sdk_backend import resolve_sdk_backend
+from .signal_aggregator import SignalAggregator
 from .skill_evolver import SkillEvolver
 from .skill_manager import SkillManager
+from .skill_signal import SkillAction
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,9 @@ class MetaClawTrainer:
         self.prm_scorer: Optional[PRMScorer] = None
         self.skill_evolver: Optional[SkillEvolver] = None
         self._wandb = None
+        self._signal_aggregator: Optional[SignalAggregator] = None
+        self._signal_detector: Optional[ConversationSignalDetector] = None
+        self._feedback_collector: Optional[FeedbackCollector] = None
 
         # Scheduler integration
         self._scheduler = scheduler
@@ -220,6 +227,17 @@ class MetaClawTrainer:
             )
             logger.info("[Trainer] SkillEvolver ready: provider=%s", self.config.evolver_provider)
 
+        # Conversation-driven skill evolution
+        if self.config.enable_skill_evolution:
+            evo_config = self.config.skill_evolution_config()
+            self._signal_aggregator = SignalAggregator(evo_config)
+            if "conversation" in evo_config.sources:
+                self._signal_detector = ConversationSignalDetector(
+                    use_llm_detection=evo_config.use_llm_detection,
+                )
+            if "feedback" in evo_config.sources:
+                self._feedback_collector = FeedbackCollector(self.skill_manager)
+
         # 6. Rollout worker (owns MetaClawAPIServer)
         self.rollout_worker = AsyncRolloutWorker(
             config=self.config,
@@ -316,51 +334,29 @@ class MetaClawTrainer:
     # Skill evolution                                                      #
     # ------------------------------------------------------------------ #
 
-    async def _maybe_evolve_skills(self, batch: list[ConversationSample]):
-        """Trigger skill evolution if success rate is below threshold.
+    def _apply_skill_actions(self, actions: list[SkillAction]) -> None:
+        """Apply SkillEvolver output to the SkillManager."""
+        for action in actions:
+            if action.action == "create":
+                self.skill_manager.add_skill(action.skill)
+            elif action.action == "update":
+                self.skill_manager.update_skill(action.skill["name"], action.skill)
+            elif action.action == "deprecate":
+                self.skill_manager.deprecate_skill(action.skill["name"], action.reasoning)
+            elif action.action == "link":
+                self.skill_manager.link_skills(action.parent_skill, action.skill["name"])
+        if any(a.action in ("create", "update") for a in actions):
+            self.skill_manager.generation += 1
 
-        After evolution, if new skills were added (skill_manager.generation bumped),
-        the RL sample buffer is cleared so pre-evolution samples are not reused
-        for gradient updates.  This enforces the MAML support/query set separation:
-        samples that caused skill evolution (support set) are never fed into the
-        RL outer loop (query set).
-        """
-        if not self.skill_evolver or not self.skill_manager:
+    async def _maybe_evolve_skills(self, batch):
+        """Skill evolution now routes through SignalAggregator."""
+        if not self.skill_evolver or not self._signal_aggregator:
             return
-        if not self.skill_evolver.should_evolve(batch, self.config.skill_update_threshold):
+        signals = self._signal_aggregator.consume()
+        if not signals:
             return
-
-        old_generation = self.skill_manager.generation
-        failed = [s for s in batch if s.reward <= 0]
-        logger.info("[SkillEvolver] evolving skills from %d failures …", len(failed))
-        new_skills = await self.skill_evolver.evolve(failed, self.skill_manager.skills)
-
-        if not new_skills:
-            return
-
-        added_total = 0
-        for skill in new_skills:
-            category = skill.get("category", "general")
-            added = self.skill_manager.add_skills([skill], category=category)
-            added_total += added
-
-        if added_total > 0:
-            logger.info("[SkillEvolver] skill evolution added %d new skills", added_total)
-
-        new_generation = self.skill_manager.generation
-        if new_generation > old_generation:
-            # Skill generation bumped — discard all pre-evolution samples to
-            # prevent stale reward signals from entering the RL update.
-            self._current_skill_generation = new_generation
-            discarded_pending = len(self._pending_batch)
-            self._pending_batch.clear()
-            discarded_queue = self.rollout_worker.clear_output_queue()
-            logger.info(
-                "[Trainer] skill_generation %d→%d: discarded %d pending + %d queued samples "
-                "(MAML support/query separation; next RL batch will use post-evolution data)",
-                old_generation, new_generation,
-                discarded_pending, discarded_queue,
-            )
+        actions = await self.skill_evolver.evolve(signals, self.skill_manager.skills)
+        self._apply_skill_actions(actions)
 
     # ------------------------------------------------------------------ #
     # Main loop                                                            #

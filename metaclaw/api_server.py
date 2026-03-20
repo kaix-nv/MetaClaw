@@ -32,9 +32,13 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from .config import MetaClawConfig
+from .conversation_signal_detector import ConversationSignalDetector
+from .feedback_collector import FeedbackCollector
 from .prm_scorer import PRMScorer
 from .sdk_backend import resolve_sdk_backend
+from .signal_aggregator import SignalAggregator
 from .skill_manager import SkillManager
+from .skill_signal import SkillAction
 from .utils import run_llm
 
 logger = logging.getLogger(__name__)
@@ -413,6 +417,9 @@ class MetaClawAPIServer:
         prm_scorer: Optional[PRMScorer] = None,
         skill_evolver=None,
         last_request_tracker=None,
+        signal_detector=None,
+        signal_aggregator=None,
+        feedback_collector=None,
     ):
         self.config = config
         self.backend = resolve_sdk_backend(config) if config.mode in ("rl", "madmax") else None
@@ -425,6 +432,11 @@ class MetaClawAPIServer:
         self.skill_evolver = skill_evolver
         # Optional LastRequestTracker for scheduler idle detection
         self._last_request_tracker = last_request_tracker
+
+        # Signal-based skill evolution (new)
+        self._signal_detector = signal_detector  # ConversationSignalDetector or None
+        self._signal_aggregator = signal_aggregator  # SignalAggregator or None
+        self._feedback_collector = feedback_collector  # FeedbackCollector or None
 
         self._served_model = config.served_model_name
         self._expected_api_key = config.proxy_api_key
@@ -671,6 +683,51 @@ class MetaClawAPIServer:
                     media_type="text/event-stream",
                 )
             return JSONResponse(content=_openai_to_anthropic_response(result["response"], model))
+
+        # Feedback endpoints for conversation-driven skill evolution
+        if self._feedback_collector and self._signal_aggregator:
+            @app.post("/feedback/rate")
+            async def feedback_rate(request: Request):
+                owner: MetaClawAPIServer = request.app.state.owner
+                body = await request.json()
+                sig = owner._feedback_collector.rate(
+                    skill_names=body["skill_names"],
+                    positive=body["positive"],
+                    session_id=body.get("session_id", ""),
+                )
+                owner._signal_aggregator.add([sig])
+                delta = 0.1 if body["positive"] else -0.15
+                if owner.skill_manager:
+                    for name in body["skill_names"]:
+                        owner.skill_manager.adjust_confidence(name, delta)
+                return JSONResponse({"status": "ok"})
+
+            @app.post("/feedback/correct")
+            async def feedback_correct(request: Request):
+                owner: MetaClawAPIServer = request.app.state.owner
+                body = await request.json()
+                sig = owner._feedback_collector.correct(
+                    skill_name=body["skill_name"],
+                    correction_text=body["correction"],
+                    session_id=body.get("session_id", ""),
+                )
+                owner._signal_aggregator.add([sig])
+                return JSONResponse({"status": "ok"})
+
+            @app.get("/feedback/review")
+            async def feedback_review_get(request: Request):
+                owner: MetaClawAPIServer = request.app.state.owner
+                limit = int(request.query_params.get("limit", "10"))
+                candidates = owner._feedback_collector.get_review_candidates(limit)
+                return JSONResponse({"skills": [{"name": s.get("name"), "confidence": s.get("confidence", 0.6)} for s in candidates]})
+
+            @app.post("/feedback/review")
+            async def feedback_review_post(request: Request):
+                owner: MetaClawAPIServer = request.app.state.owner
+                body = await request.json()
+                signals = owner._feedback_collector.submit_review(body["reviews"])
+                owner._signal_aggregator.add(signals)
+                return JSONResponse({"status": "ok", "signals": len(signals)})
 
         return app
 
@@ -1086,6 +1143,20 @@ class MetaClawAPIServer:
                         "prompt_text": prompt_text_simple,
                         "response_text": response_text_simple,
                     })
+                # Signal detection (conversation-driven skill evolution)
+                if self._signal_detector and self._signal_aggregator:
+                    _user_msgs = [m for m in messages if m.get("role") == "user"]
+                    _user_message_text = _flatten_message_content(_user_msgs[-1].get("content", "")) if _user_msgs else ""
+                    _turn_data = {
+                        "session_id": session_id,
+                        "turn_num": turn_num,
+                        "user_message": _user_message_text,
+                        "assistant_response": response_text_simple,
+                        "active_skills": [s["name"] for s in self.skill_manager.retrieve(_user_message_text, top_k=self.config.skill_top_k)] if self.skill_manager and _user_message_text else [],
+                    }
+                    _signals = self._signal_detector.detect(_turn_data)
+                    if _signals:
+                        self._signal_aggregator.add(_signals)
                 output["session_id"] = session_id
                 return {"response": output}
 
@@ -1132,6 +1203,20 @@ class MetaClawAPIServer:
                 session_id, turn_num, len(prompt_ids), len(response_ids),
             )
             self._buffer_record(session_id, turn_num, messages, prompt_text, response_text, tool_calls)
+            # Signal detection (conversation-driven skill evolution)
+            if self._signal_detector and self._signal_aggregator:
+                _user_msgs = [m for m in messages if m.get("role") == "user"]
+                _user_message_text = _flatten_message_content(_user_msgs[-1].get("content", "")) if _user_msgs else ""
+                _turn_data = {
+                    "session_id": session_id,
+                    "turn_num": turn_num,
+                    "user_message": _user_message_text,
+                    "assistant_response": response_text,
+                    "active_skills": [s["name"] for s in self.skill_manager.retrieve(_user_message_text, top_k=self.config.skill_top_k)] if self.skill_manager and _user_message_text else [],
+                }
+                _signals = self._signal_detector.detect(_turn_data)
+                if _signals:
+                    self._signal_aggregator.add(_signals)
             # Keep skills_only auto-summarization working even when tokenizer is loaded.
             if (
                 self.config.mode == "skills_only"
