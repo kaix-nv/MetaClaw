@@ -182,13 +182,18 @@ class SkillEvolver:
 
     def get_update_summary(self) -> dict:
         if not self.update_history:
-            return {"total_updates": 0, "total_skills_generated": 0}
+            return {"total_updates": 0, "total_actions_generated": 0}
         return {
             "total_updates": len(self.update_history),
-            "total_skills_generated": sum(
-                h["num_skills_generated"] for h in self.update_history
+            "total_actions_generated": sum(
+                h.get("num_actions_generated", h.get("num_skills_generated", 0))
+                for h in self.update_history
             ),
             "all_skill_names": [
+                a.get("skill_name", "")
+                for h in self.update_history
+                for a in h.get("actions", [])
+            ] or [
                 n for h in self.update_history for n in h.get("skill_names", [])
             ],
         }
