@@ -25,6 +25,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from .skill_signal import SkillSignal, SkillAction
+
 logger = logging.getLogger(__name__)
 
 # Slug validation: lowercase letters, digits, hyphens, starting with a letter
@@ -122,58 +124,44 @@ class SkillEvolver:
 
     async def evolve(
         self,
-        failed_samples: list,
+        signals: list[SkillSignal],
         current_skills: Dict[str, Any],
-    ) -> list[dict]:
-        """
-        Analyse *failed_samples* and propose new skills in Claude skill format.
+    ) -> list[SkillAction]:
+        """Analyse signals and propose skill actions.
 
         Parameters
         ----------
-        failed_samples:
-            List of ``ConversationSample`` objects whose reward <= 0.
+        signals:
+            List of SkillSignal objects from any source.
         current_skills:
-            The full skill bank dict (``general_skills``,
-            ``task_specific_skills``, ``common_mistakes``).
+            The full skill bank dict (general_skills, task_specific_skills, common_mistakes).
 
         Returns
         -------
-        List of new skill dicts with keys:
-        ``name``, ``description``, ``content``, ``category``
-        Ready to be passed to ``SkillManager.add_skills()``.
+        List of SkillAction objects specifying create/update/deprecate/link operations.
         """
-        if not failed_samples:
+        if not signals:
             return []
 
         next_dyn_idx = self._next_dyn_index(current_skills)
-        prompt = self._build_analysis_prompt(failed_samples, current_skills, next_dyn_idx)
+        prompt = self._build_signal_analysis_prompt(signals, current_skills, next_dyn_idx)
 
         try:
-            # Synchronous LLM call run in a thread to avoid blocking the event loop
             response = await asyncio.to_thread(self._call_llm, prompt)
-            raw_skills = self._parse_skills_response(response)
-            skills = self._finalise_names(raw_skills, next_dyn_idx)
-            skills = skills[: self.max_new_skills]
+            actions = self._parse_actions_response(response, next_dyn_idx)
 
             record = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "num_failures_analyzed": len(failed_samples),
-                "num_skills_generated": len(skills),
-                "skill_names": [s.get("name") for s in skills],
-                # Full skill content so the history file is self-contained
-                "skills": [
+                "num_signals_analyzed": len(signals),
+                "signal_types": list(set(s.signal_type for s in signals)),
+                "num_actions_generated": len(actions),
+                "actions": [
                     {
-                        "name": s.get("name"),
-                        "category": s.get("category", "general"),
-                        "description": s.get("description", ""),
-                        "content": s.get("content", ""),
+                        "action": a.action,
+                        "skill_name": a.skill.get("name", ""),
+                        "reasoning": a.reasoning,
                     }
-                    for s in skills
-                ],
-                # Failure summaries for traceability (first 300 chars of each)
-                "failure_prompts": [
-                    getattr(s, "prompt_text", "")[-300:]
-                    for s in failed_samples[:6]
+                    for a in actions
                 ],
             }
             self.update_history.append(record)
@@ -181,12 +169,12 @@ class SkillEvolver:
                 self._append_history(record)
 
             logger.info(
-                "[SkillEvolver] generated %d new skills from %d failures: %s",
-                len(skills),
-                len(failed_samples),
-                [s.get("name") for s in skills],
+                "[SkillEvolver] generated %d actions from %d signals: %s",
+                len(actions),
+                len(signals),
+                [(a.action, a.skill.get("name", "")) for a in actions],
             )
-            return skills
+            return actions
 
         except Exception as e:
             logger.error("[SkillEvolver] LLM call failed: %s", e, exc_info=True)
@@ -302,6 +290,96 @@ class SkillEvolver:
             "]"
         )
 
+    def _build_signal_analysis_prompt(
+        self,
+        signals: list[SkillSignal],
+        current_skills: Dict[str, Any],
+        next_dyn_idx: int,
+    ) -> str:
+        """Build LLM prompt from signals + existing skill inventory."""
+        # Group signals by type
+        explicit = [s for s in signals if s.signal_type == "explicit_save"]
+        corrections = [s for s in signals if s.signal_type in ("implicit_correction", "user_correction")]
+        patterns = [s for s in signals if s.signal_type == "pattern_detected"]
+        prm_failures = [s for s in signals if s.signal_type == "prm_failure"]
+        other = [s for s in signals if s not in explicit + corrections + patterns + prm_failures]
+
+        signal_blocks = []
+
+        if explicit:
+            signal_blocks.append("## Explicit User Requests\n")
+            for i, s in enumerate(explicit[:6]):
+                msg = s.content.get("user_message", "")
+                signal_blocks.append(f"### Request {i+1}\n```\n{msg[:600]}\n```\n")
+
+        if corrections:
+            signal_blocks.append("## User Corrections\n")
+            for i, s in enumerate(corrections[:6]):
+                msg = s.content.get("user_message", s.content.get("corrected", ""))
+                wrong = s.content.get("wrong_response", "")[:300]
+                signal_blocks.append(
+                    f"### Correction {i+1}\n"
+                    f"**What went wrong:** ```\n{wrong}\n```\n"
+                    f"**User said:** ```\n{msg[:400]}\n```\n"
+                )
+
+        if prm_failures:
+            signal_blocks.append("## Failed Conversations (PRM-scored)\n")
+            for i, s in enumerate(prm_failures[:6]):
+                prompt_text = s.content.get("prompt_text", "")[-600:]
+                response_text = s.content.get("response_text", "")[:500]
+                reward = s.content.get("reward", 0)
+                signal_blocks.append(
+                    f"### Failure {i+1} (reward={reward:.1f})\n"
+                    f"**Context:** ```\n...{prompt_text}\n```\n"
+                    f"**Response:** ```\n{response_text}\n```\n"
+                )
+
+        # Existing skills for deduplication
+        existing = []
+        for s in current_skills.get("general_skills", []):
+            existing.append(s.get("name", ""))
+        for tt, skills in current_skills.get("task_specific_skills", {}).items():
+            for s in skills:
+                existing.append(f"[{tt}] {s.get('name', '')}")
+        for s in current_skills.get("common_mistakes", []):
+            existing.append(f"[mistake] {s.get('name', '')}")
+
+        available_cats = list(
+            current_skills.get("task_specific_skills", {}).keys()
+        ) or _DEFAULT_CATEGORIES
+
+        example_name = f"dyn-{next_dyn_idx:03d}"
+
+        return (
+            "You are a skill engineer for an AI assistant.\n"
+            "Your job: analyze the signals below and propose skill actions "
+            "(create new skills, update existing ones, deprecate bad ones, or link related skills).\n\n"
+            "---\n"
+            + "\n".join(signal_blocks)
+            + "\n---\n"
+            "## Existing Skills (do NOT duplicate)\n\n"
+            + json.dumps(existing, indent=2)
+            + "\n\n---\n"
+            "## Instructions\n\n"
+            f"Propose **1 to {self.max_new_skills}** skill actions. Each action is one of:\n"
+            "- `create`: a brand new skill\n"
+            "- `update`: modify an existing skill's description/content\n"
+            "- `deprecate`: mark a skill as no longer useful\n"
+            "- `link`: set a parent-child relationship between skills\n\n"
+            "Each action must include:\n"
+            "- `action`: one of create/update/deprecate/link\n"
+            "- `skill`: {name, description, content, category} — for create/update, the full skill. "
+            "For deprecate/link, at minimum {name}.\n"
+            "- `parent_skill`: (only for link) the parent skill name\n"
+            "- `reasoning`: why this action is needed\n\n"
+            "Skill format: name=lowercase-hyphenated-slug, "
+            f"use `{example_name}` only if no descriptive name fits. "
+            f"category: one of {available_cats} or \"general\" or \"common_mistakes\".\n"
+            "content: 6-15 lines of actionable Markdown.\n\n"
+            "**Output:** Return ONLY a valid JSON array of action objects.\n"
+        )
+
     # ------------------------------------------------------------------ #
     # Response parsing                                                     #
     # ------------------------------------------------------------------ #
@@ -334,6 +412,52 @@ class SkillEvolver:
             valid.append(s)
 
         return valid
+
+    def _parse_actions_response(self, response: str, next_dyn_idx: int) -> list[SkillAction]:
+        """Parse JSON array of action objects from LLM response."""
+        clean = re.sub(r"```(?:json)?\s*", "", response).strip()
+        j_start = clean.find("[")
+        j_end = clean.rfind("]") + 1
+        if j_start == -1 or j_end <= j_start:
+            logger.warning("[SkillEvolver] no JSON array found in response:\n%s", response[:400])
+            return []
+
+        try:
+            raw_actions = json.loads(clean[j_start:j_end])
+        except json.JSONDecodeError as e:
+            logger.warning("[SkillEvolver] JSON parse error: %s", e)
+            return []
+
+        actions = []
+        dyn_counter = next_dyn_idx
+        for raw in raw_actions:
+            action_type = raw.get("action", "")
+            if action_type not in ("create", "update", "deprecate", "link"):
+                logger.warning("[SkillEvolver] unknown action type: %s", action_type)
+                continue
+
+            skill = raw.get("skill", {})
+            if not isinstance(skill, dict):
+                continue
+
+            # Ensure skill has a valid name
+            name = skill.get("name", "").strip().lower()
+            if action_type in ("create", "update") and not _SLUG_RE.match(name):
+                name = f"dyn-{dyn_counter:03d}"
+                dyn_counter += 1
+                skill["name"] = name
+
+            if not skill.get("category"):
+                skill["category"] = "general"
+
+            actions.append(SkillAction(
+                action=action_type,
+                skill=skill,
+                parent_skill=raw.get("parent_skill", ""),
+                reasoning=raw.get("reasoning", ""),
+            ))
+
+        return actions[:self.max_new_skills]
 
     # ------------------------------------------------------------------ #
     # Name / slug management                                               #
