@@ -60,9 +60,10 @@ def main():
         )
         logger.info("Method 1 result: %s", m1_result)
 
-        # Write merged skill file
+        # Write merged skill file (exclude the base skill to avoid duplication)
         if args.base_skill:
-            m1_skills = list(study._skill_manager._iter_all_skills())
+            m1_skills = [s for s in study._skill_manager._iter_all_skills()
+                         if s.get("name") != "cutile-base-skill"]
             SkillWriter.merge(
                 args.base_skill, m1_skills,
                 os.path.join(results_dir, "method-1-direct", "cutile-skill-merged.md"),
@@ -92,9 +93,10 @@ def main():
         )
         logger.info("Method 2 result: %s", m2_result)
 
-        # Write merged skill file
+        # Write merged skill file (exclude the base skill to avoid duplication)
         if args.base_skill:
-            m2_skills = list(practice._skill_manager._iter_all_skills())
+            m2_skills = [s for s in practice._skill_manager._iter_all_skills()
+                         if s.get("name") != "cutile-base-skill"]
             SkillWriter.merge(
                 args.base_skill, m2_skills,
                 os.path.join(results_dir, "method-2-multiturn", "cutile-skill-merged.md"),
