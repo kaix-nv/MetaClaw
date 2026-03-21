@@ -15,10 +15,12 @@ class LLMClient:
     def __init__(self, model: str = "", api_key: str = "", base_url: str = ""):
         from openai import OpenAI
 
-        self._model = model or os.environ.get("SKILL_EVOLVER_MODEL", "gpt-5.2")
-        api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._model = model or os.environ.get(
+            "SKILL_EVOLVER_MODEL", "aws/anthropic/bedrock-claude-opus-4-6"
+        )
+        api_key = api_key or os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", ""))
         base_url = base_url or os.environ.get(
-            "OPENAI_BASE_URL", "https://openai-api.shenmishajing.workers.dev/v1"
+            "OPENAI_BASE_URL", "https://inference-api.nvidia.com/v1"
         )
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
