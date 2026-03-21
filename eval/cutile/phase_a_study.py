@@ -43,10 +43,14 @@ tile sizes, and hardware features (TMA, tensor cores) used.
 class PhaseAStudy:
     """Read TileGym kernels → generate teaching summaries → extract skills."""
 
-    def __init__(self, llm, skill_dir: str):
+    def __init__(self, llm, skill_dir: str, base_skill: str = ""):
         self._llm = llm
         self._skill_dir = skill_dir
         os.makedirs(skill_dir, exist_ok=True)
+
+        # Load base skill into SkillManager so evolver sees it and avoids duplication
+        if base_skill and os.path.isfile(base_skill):
+            self._load_base_skill(skill_dir, base_skill)
 
         self._detector = ConversationSignalDetector(use_llm_detection=False)
         self._aggregator = SignalAggregator(SkillEvolutionConfig(
@@ -55,6 +59,23 @@ class PhaseAStudy:
         ))
         self._skill_manager = SkillManager(skill_dir, retrieval_mode="template")
         self._evolver = SkillEvolver(llm_client=_LLMAdapter(llm))
+
+    @staticmethod
+    def _load_base_skill(skill_dir: str, base_skill: str) -> None:
+        """Copy base skill into the skill dir so SkillManager loads it."""
+        base_dir = os.path.join(skill_dir, "cutile-base-skill")
+        os.makedirs(base_dir, exist_ok=True)
+        dest = os.path.join(base_dir, "SKILL.md")
+        if not os.path.exists(dest):
+            content = Path(base_skill).read_text(encoding="utf-8")
+            # Wrap in frontmatter so SkillManager can parse it
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write("---\n")
+                f.write("name: cutile-base-skill\n")
+                f.write("description: Base cuTile Python API reference and patterns\n")
+                f.write("category: coding\n")
+                f.write("---\n\n")
+                f.write(content)
 
     def generate_teaching_summary(self, kernel_source: str, test_source: str) -> str:
         prompt = _TEACHING_PROMPT.format(

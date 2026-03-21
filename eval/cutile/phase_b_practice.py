@@ -17,6 +17,7 @@ from metaclaw.skill_signal import SkillSignal
 
 from .correction_simulator import CorrectionSimulator
 from .correction_clusterer import CorrectionClusterer
+from .phase_a_study import PhaseAStudy
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,16 @@ class PhaseBPractice:
         skill_dir: str,
         max_rounds: int = 3,
         correction_threshold: int = 3,
+        base_skill: str = "",
     ):
         self._llm = llm
         self._skill_dir = skill_dir
         self._max_rounds = max_rounds
         os.makedirs(skill_dir, exist_ok=True)
+
+        # Load base skill if not already present (for standalone Phase B runs)
+        if base_skill and os.path.isfile(base_skill):
+            PhaseAStudy._load_base_skill(skill_dir, base_skill)
 
         self._detector = ConversationSignalDetector(use_llm_detection=False)
         self._aggregator = SignalAggregator(SkillEvolutionConfig(

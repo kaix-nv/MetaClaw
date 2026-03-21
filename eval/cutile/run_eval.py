@@ -53,7 +53,7 @@ def main():
     if args.method in ("all", "direct"):
         logger.info("=== Method 1: Direct Extraction ===")
         m1_skill_dir = os.path.join(results_dir, "method-1-direct", "evolved-skills")
-        study = PhaseAStudy(llm=llm, skill_dir=m1_skill_dir)
+        study = PhaseAStudy(llm=llm, skill_dir=m1_skill_dir, base_skill=args.base_skill)
         m1_result = study.run(
             pairs,
             output_path=os.path.join(results_dir, "method-1-direct", "teaching-summaries.jsonl"),
@@ -73,7 +73,7 @@ def main():
         logger.info("=== Method 2: Multi-Turn Evolution ===")
         # Phase A first (same as Method 1)
         m2_skill_dir = os.path.join(results_dir, "method-2-multiturn", "evolved-skills")
-        study_m2 = PhaseAStudy(llm=llm, skill_dir=m2_skill_dir)
+        study_m2 = PhaseAStudy(llm=llm, skill_dir=m2_skill_dir, base_skill=args.base_skill)
         study_m2.run(
             pairs,
             output_path=os.path.join(results_dir, "method-2-multiturn", "phase-a", "teaching-summaries.jsonl"),
@@ -84,6 +84,7 @@ def main():
             llm=llm,
             skill_dir=m2_skill_dir,
             max_rounds=args.rounds,
+            base_skill=args.base_skill,
         )
         m2_result = practice.run(
             pairs,
