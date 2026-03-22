@@ -23,6 +23,21 @@ from .phase_a_study import PhaseAStudy
 
 logger = logging.getLogger(__name__)
 
+
+def _strip_markdown_fences(code: str) -> str:
+    """Strip markdown code fences from LLM output to get clean Python."""
+    import re
+    code = code.strip()
+    # Remove ```python ... ``` or ``` ... ```
+    code = re.sub(r'^```(?:python)?\s*\n', '', code)
+    code = re.sub(r'\n```\s*$', '', code)
+    # If there are multiple fenced blocks, extract just the code
+    if '```' in code:
+        blocks = re.findall(r'```(?:python)?\s*\n(.*?)```', code, re.DOTALL)
+        if blocks:
+            code = '\n\n'.join(blocks)
+    return code.strip()
+
 _SOLVE_PROMPT = """\
 You are solving a cuTile kernel implementation problem.
 
@@ -119,7 +134,7 @@ class PhaseBPractice:
                 f"- {name}" for name in active_skills
             )
         prompt = _SOLVE_PROMPT.format(test_source=test_source[:3000], skills_text=skills_text)
-        return self._llm.complete(prompt, max_tokens=4000)
+        return _strip_markdown_fences(self._llm.complete(prompt, max_tokens=4000))
 
     def solve_kernel_with_ref(
         self, test_source: str, reference_code: str, active_skills: list[str]
@@ -135,7 +150,7 @@ class PhaseBPractice:
             reference_code=reference_code[:6000],
             skills_text=skills_text,
         )
-        return self._llm.complete(prompt, max_tokens=4000)
+        return _strip_markdown_fences(self._llm.complete(prompt, max_tokens=4000))
 
     def generate_diff_skill(self, failed_attempt: str, fixed_attempt: str) -> str:
         """Generate a teaching note from the diff between failed and fixed attempts."""
