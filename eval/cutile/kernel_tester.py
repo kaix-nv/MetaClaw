@@ -1,7 +1,7 @@
-"""Test a kernel implementation against TileGym test suite on GPU.
+"""Test a kernel implementation against TileGym test suite using Docker.
 
-Replaces a kernel file in TileGym, runs the corresponding pytest,
-and reports pass/fail. Restores the original kernel after testing.
+Replaces a kernel file in TileGym, runs pytest inside the compute-eval
+Docker container, and reports pass/fail. Restores the original after testing.
 """
 
 from __future__ import annotations
@@ -14,22 +14,22 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_IMAGE = "local/compute-eval-python:13.1.0"
+
 
 class KernelTester:
-    """Test kernel implementations by running TileGym pytest on GPU."""
+    """Test kernel implementations by running TileGym pytest in Docker."""
 
-    def __init__(self, tilegym_dir: str):
-        self._tilegym_dir = Path(tilegym_dir)
+    def __init__(self, tilegym_dir: str, docker_image: str = _DEFAULT_IMAGE):
+        self._tilegym_dir = Path(tilegym_dir).resolve()
         self._kernel_dir = self._tilegym_dir / "src" / "tilegym" / "ops" / "cutile"
         self._test_dir = self._tilegym_dir / "tests" / "ops"
+        self._docker_image = docker_image
 
     def test_kernel(self, kernel_name: str, solution_code: str, timeout: int = 120) -> dict:
-        """Replace kernel, run pytest, restore original. Returns {passed, output, kernel_name}.
+        """Replace kernel, run pytest in Docker, restore original.
 
-        Args:
-            kernel_name: Name of the kernel (e.g., 'softmax')
-            solution_code: The agent's implementation code
-            timeout: Max seconds for pytest
+        Returns {passed, output, kernel_name}.
         """
         kernel_file = self._kernel_dir / f"{kernel_name}.py"
         test_file = self._test_dir / f"test_{kernel_name}.py"
@@ -47,21 +47,22 @@ class KernelTester:
             # Write agent's solution
             kernel_file.write_text(solution_code, encoding="utf-8")
 
-            # Run pytest with quick mode (first parametrized case only)
+            # Run pytest inside Docker container
             result = subprocess.run(
                 [
-                    "python", "-m", "pytest",
-                    str(test_file),
-                    "-x",              # stop on first failure
-                    "--quick-run",     # TileGym's quick mode
-                    "--timeout", str(timeout),
-                    "-v",
-                    "--tb=short",
+                    "docker", "run", "--rm",
+                    "--gpus", "all",
+                    "-v", f"{self._tilegym_dir}:/workspace/tilegym:rw",
+                    "-w", "/workspace/tilegym",
+                    "-e", "CUDA_TILE_CACHE_DIR=/tmp/cutile-cache",
+                    self._docker_image,
+                    "bash", "-c",
+                    f"pip install -e . -q 2>/dev/null && "
+                    f"python -m pytest tests/ops/test_{kernel_name}.py -x --quick-run -v 2>&1"
                 ],
                 capture_output=True,
                 text=True,
-                timeout=timeout + 30,  # extra buffer
-                cwd=str(self._tilegym_dir),
+                timeout=timeout + 60,  # extra buffer for Docker startup
             )
 
             passed = result.returncode == 0
