@@ -38,9 +38,14 @@ Write only the implementation code.
 
 _SOLVE_WITH_HINT_PROMPT = """\
 You are solving a cuTile kernel implementation problem.
-Your previous attempt was incorrect. Here is feedback:
+Your previous attempt was incorrect. Here is the correct reference implementation:
 
-{hint}
+```python
+{reference_code}
+```
+
+Study the reference carefully, then re-implement the solution.
+Focus on the cuTile patterns the reference uses that you missed.
 
 Test specification:
 ```python
@@ -49,7 +54,7 @@ Test specification:
 
 {skills_text}
 
-Write a corrected cuTile kernel implementation.
+Write the corrected cuTile kernel implementation.
 Use the ct.* API (ct.kernel, ct.launch, ct.load, ct.store, etc.).
 Write only the implementation code.
 """
@@ -113,8 +118,10 @@ class PhaseBPractice:
         prompt = _SOLVE_PROMPT.format(test_source=test_source[:3000], skills_text=skills_text)
         return self._llm.complete(prompt, max_tokens=3000)
 
-    def solve_kernel_with_hint(self, test_source: str, hint: str, active_skills: list[str]) -> str:
-        """Agent re-attempts with a correction hint."""
+    def solve_kernel_with_hint(
+        self, test_source: str, reference_code: str, active_skills: list[str]
+    ) -> str:
+        """Agent re-attempts after seeing the reference implementation."""
         skills_text = ""
         if active_skills:
             skills_text = "Available cuTile skills:\n" + "\n".join(
@@ -122,7 +129,7 @@ class PhaseBPractice:
             )
         prompt = _SOLVE_WITH_HINT_PROMPT.format(
             test_source=test_source[:3000],
-            hint=hint,
+            reference_code=reference_code[:3000],
             skills_text=skills_text,
         )
         return self._llm.complete(prompt, max_tokens=3000)
@@ -164,12 +171,9 @@ class PhaseBPractice:
                 })
                 continue
 
-            # Step 2: Generate correction hint
-            correction = result["correction"]
-
-            # Step 3: Re-attempt with hint
+            # Step 2: Re-attempt with reference code visible
             fixed_attempt = self.solve_kernel_with_hint(
-                pair["test_source"], correction, active_skills
+                pair["test_source"], pair["kernel_source"], active_skills
             )
             re_result = self._correction_sim.compare(
                 agent_solution=fixed_attempt,
@@ -202,7 +206,7 @@ class PhaseBPractice:
                 })
                 fixes.append({
                     "kernel": pair["kernel_name"],
-                    "correction": correction,
+                    "initial_error": result["correction"],
                     "diff_skill": diff_message,
                 })
             else:
