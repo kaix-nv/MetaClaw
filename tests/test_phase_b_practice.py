@@ -41,32 +41,7 @@ def skill_dir(tmp_path):
     return str(tmp_path / "skills")
 
 
-def test_solve_kernel(skill_dir):
-    practice = PhaseBPractice(llm=FakeLLM(), skill_dir=skill_dir)
+def test_solve_kernel(skill_dir, tmp_path):
+    practice = PhaseBPractice(llm=FakeLLM(), skill_dir=skill_dir, tilegym_dir=str(tmp_path))
     solution = practice.solve_kernel("def test_op(): pass", [])
     assert len(solution) > 0
-
-
-def test_single_round(skill_dir):
-    practice = PhaseBPractice(llm=FakeLLM(), skill_dir=skill_dir)
-    pairs = [{
-        "kernel_name": "matmul",
-        "kernel_source": "@ct.kernel\ndef matmul(): ct.matmul(a, b)",
-        "test_source": "def test_op(): pass",
-    }]
-    result = practice.run_round(pairs, round_num=1)
-    assert "num_attempted" in result
-    assert "num_fixed" in result
-    assert "num_still_failing" in result
-
-
-def test_full_run_respects_rounds(skill_dir):
-    practice = PhaseBPractice(llm=FakeLLM(), skill_dir=skill_dir, max_rounds=2)
-    pairs = [{
-        "kernel_name": "matmul",
-        "kernel_source": "@ct.kernel\ndef matmul(): ct.matmul(a, b)",
-        "test_source": "def test_op(): pass",
-    }]
-    result = practice.run(pairs)
-    assert "rounds" in result
-    assert len(result["rounds"]) <= 2

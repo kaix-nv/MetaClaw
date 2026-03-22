@@ -80,10 +80,11 @@ def main():
             output_path=os.path.join(results_dir, "method-2-multiturn", "phase-a", "teaching-summaries.jsonl"),
         )
 
-        # Phase B
+        # Phase B (requires GPU for TileGym test execution)
         practice = PhaseBPractice(
             llm=llm,
             skill_dir=m2_skill_dir,
+            tilegym_dir=args.tilegym_dir,
             max_rounds=args.rounds,
             base_skill=args.base_skill,
         )

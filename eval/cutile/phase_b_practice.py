@@ -1,4 +1,7 @@
-"""Phase B: Solve-and-check with skill evolution from successful fixes only."""
+"""Phase B: Solve-and-check with skill evolution from successful fixes.
+
+Runs on B200 — uses TileGym test suite to verify kernel correctness.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +18,7 @@ from metaclaw.skill_evolver import SkillEvolver
 from metaclaw.skill_manager import SkillManager
 from metaclaw.skill_signal import SkillSignal
 
-from .correction_simulator import CorrectionSimulator
-from .correction_clusterer import CorrectionClusterer
+from .kernel_tester import KernelTester
 from .phase_a_study import PhaseAStudy
 
 logger = logging.getLogger(__name__)
@@ -33,10 +35,10 @@ Test specification:
 
 Write the cuTile kernel implementation that passes these tests.
 Use the ct.* API (ct.kernel, ct.launch, ct.load, ct.store, etc.).
-Write only the implementation code.
+Write only the implementation code. Start with the imports.
 """
 
-_SOLVE_WITH_HINT_PROMPT = """\
+_SOLVE_WITH_REF_PROMPT = """\
 You are solving a cuTile kernel implementation problem.
 Your previous attempt was incorrect. Here is the correct reference implementation:
 
@@ -45,7 +47,6 @@ Your previous attempt was incorrect. Here is the correct reference implementatio
 ```
 
 Study the reference carefully, then re-implement the solution.
-Focus on the cuTile patterns the reference uses that you missed.
 
 Test specification:
 ```python
@@ -54,14 +55,13 @@ Test specification:
 
 {skills_text}
 
-Write the corrected cuTile kernel implementation.
-Use the ct.* API (ct.kernel, ct.launch, ct.load, ct.store, etc.).
-Write only the implementation code.
+Write the cuTile kernel implementation that passes these tests.
+Write only the implementation code. Start with the imports.
 """
 
 _DIFF_SKILL_PROMPT = """\
 Compare these two cuTile kernel implementations for the same problem.
-The first attempt FAILED, the second attempt SUCCEEDED after receiving a hint.
+The first attempt FAILED, the second attempt SUCCEEDED after studying a reference.
 
 FAILED attempt:
 ```python
@@ -80,19 +80,23 @@ Be specific about cuTile API usage (ct.* functions, tile sizes, TMA, etc.).
 
 
 class PhaseBPractice:
-    """Iterative solve-and-check: only learn from successful fixes."""
+    """Iterative solve-and-check using real GPU tests for verification."""
 
     def __init__(
         self,
         llm,
         skill_dir: str,
+        tilegym_dir: str,
         max_rounds: int = 3,
+        max_retries: int = 3,
         correction_threshold: int = 3,
         base_skill: str = "",
     ):
         self._llm = llm
         self._skill_dir = skill_dir
+        self._tilegym_dir = tilegym_dir
         self._max_rounds = max_rounds
+        self._max_retries = max_retries
         os.makedirs(skill_dir, exist_ok=True)
 
         if base_skill and os.path.isfile(base_skill):
@@ -105,8 +109,7 @@ class PhaseBPractice:
         ))
         self._skill_manager = SkillManager(skill_dir, retrieval_mode="template")
         self._evolver = SkillEvolver(llm_client=_LLMAdapter(llm))
-        self._correction_sim = CorrectionSimulator(llm)
-        self._clusterer = CorrectionClusterer()
+        self._tester = KernelTester(tilegym_dir)
 
     def solve_kernel(self, test_source: str, active_skills: list[str]) -> str:
         """Agent attempts to implement a kernel given its test spec."""
@@ -116,9 +119,9 @@ class PhaseBPractice:
                 f"- {name}" for name in active_skills
             )
         prompt = _SOLVE_PROMPT.format(test_source=test_source[:3000], skills_text=skills_text)
-        return self._llm.complete(prompt, max_tokens=3000)
+        return self._llm.complete(prompt, max_tokens=4000)
 
-    def solve_kernel_with_hint(
+    def solve_kernel_with_ref(
         self, test_source: str, reference_code: str, active_skills: list[str]
     ) -> str:
         """Agent re-attempts after seeing the reference implementation."""
@@ -127,18 +130,18 @@ class PhaseBPractice:
             skills_text = "Available cuTile skills:\n" + "\n".join(
                 f"- {name}" for name in active_skills
             )
-        prompt = _SOLVE_WITH_HINT_PROMPT.format(
+        prompt = _SOLVE_WITH_REF_PROMPT.format(
             test_source=test_source[:3000],
-            reference_code=reference_code[:3000],
+            reference_code=reference_code[:6000],
             skills_text=skills_text,
         )
-        return self._llm.complete(prompt, max_tokens=3000)
+        return self._llm.complete(prompt, max_tokens=4000)
 
     def generate_diff_skill(self, failed_attempt: str, fixed_attempt: str) -> str:
         """Generate a teaching note from the diff between failed and fixed attempts."""
         prompt = _DIFF_SKILL_PROMPT.format(
-            failed_attempt=failed_attempt[:1500],
-            fixed_attempt=fixed_attempt[:1500],
+            failed_attempt=failed_attempt[:2000],
+            fixed_attempt=fixed_attempt[:2000],
         )
         return self._llm.complete(prompt, max_tokens=500)
 
@@ -148,62 +151,54 @@ class PhaseBPractice:
         round_num: int,
         output_dir: str = "",
     ) -> dict:
-        """Run one round: attempt → correct → re-attempt → learn from fixes."""
+        """Run one round: attempt → test on GPU → re-attempt with ref → test → learn from fixes."""
         active_skills = [s["name"] for s in self._skill_manager._iter_all_skills()]
         attempts = []
         fixes = []
         still_failing = []
 
         for pair in pairs:
-            # Step 1: First attempt
-            first_attempt = self.solve_kernel(pair["test_source"], active_skills)
-            result = self._correction_sim.compare(
-                agent_solution=first_attempt,
-                reference=pair["kernel_source"],
-                kernel_name=pair["kernel_name"],
-            )
+            kernel_name = pair["kernel_name"]
 
-            if result["is_correct"]:
+            # Step 1: First attempt (blind)
+            first_attempt = self.solve_kernel(pair["test_source"], active_skills)
+            test_result = self._tester.test_kernel(kernel_name, first_attempt)
+
+            if test_result["passed"]:
+                logger.info("[PhaseB] %s: passed on first attempt", kernel_name)
                 attempts.append({
-                    "kernel": pair["kernel_name"],
+                    "kernel": kernel_name,
                     "status": "passed_first",
-                    "solution_preview": first_attempt[:200],
                 })
                 continue
 
-            # Step 2: Re-attempt with reference code (up to max_retries)
-            max_retries = 3
+            logger.info("[PhaseB] %s: failed first attempt, trying with reference", kernel_name)
+
+            # Step 2: Re-attempt with reference (up to max_retries)
             fixed = False
             latest_attempt = first_attempt
 
-            for retry in range(1, max_retries + 1):
-                fixed_attempt = self.solve_kernel_with_hint(
+            for retry in range(1, self._max_retries + 1):
+                attempt = self.solve_kernel_with_ref(
                     pair["test_source"], pair["kernel_source"], active_skills
                 )
-                re_result = self._correction_sim.compare(
-                    agent_solution=fixed_attempt,
-                    reference=pair["kernel_source"],
-                    kernel_name=pair["kernel_name"],
-                )
+                test_result = self._tester.test_kernel(kernel_name, attempt)
 
-                if re_result["is_correct"]:
+                if test_result["passed"]:
                     fixed = True
-                    latest_attempt = fixed_attempt
+                    latest_attempt = attempt
+                    logger.info("[PhaseB] %s: FIXED on retry %d/%d", kernel_name, retry, self._max_retries)
                     break
                 else:
-                    logger.info(
-                        "[PhaseB] %s retry %d/%d still failing",
-                        pair["kernel_name"], retry, max_retries,
-                    )
-                    latest_attempt = fixed_attempt
+                    logger.info("[PhaseB] %s: retry %d/%d still failing", kernel_name, retry, self._max_retries)
+                    latest_attempt = attempt
 
             if fixed:
-                # SUCCESS: Learn from what the fix did right
+                # SUCCESS: Extract skill from diff between failed and fixed
                 diff_message = self.generate_diff_skill(first_attempt, latest_attempt)
 
-                # Feed the positive teaching note through conversation pipeline
                 turn_data = {
-                    "session_id": f"phase-b-round{round_num}-{pair['kernel_name']}",
+                    "session_id": f"phase-b-round{round_num}-{kernel_name}",
                     "turn_num": 1,
                     "user_message": diff_message,
                     "assistant_response": latest_attempt[:500],
@@ -215,23 +210,13 @@ class PhaseBPractice:
                     signals = self._detector.detect(turn_data)
                 self._aggregator.add(signals)
 
-                attempts.append({
-                    "kernel": pair["kernel_name"],
-                    "status": "fixed",
-                    "solution_preview": latest_attempt[:200],
-                })
+                attempts.append({"kernel": kernel_name, "status": "fixed"})
                 fixes.append({
-                    "kernel": pair["kernel_name"],
-                    "initial_error": result["correction"],
+                    "kernel": kernel_name,
                     "diff_skill": diff_message,
                 })
             else:
-                # Still failing after all retries: do NOT learn
-                attempts.append({
-                    "kernel": pair["kernel_name"],
-                    "status": "still_failing",
-                    "solution_preview": first_attempt[:200],
-                })
+                attempts.append({"kernel": kernel_name, "status": "still_failing"})
                 still_failing.append(pair)
 
         # Evolve from successful fixes only
@@ -249,7 +234,7 @@ class PhaseBPractice:
                     if self._skill_manager.update_skill(action.skill["name"], action.skill):
                         num_evolved += 1
 
-        # Save round artifacts
+        # Save artifacts
         if output_dir:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             with open(os.path.join(output_dir, "attempts.jsonl"), "w") as f:
@@ -289,7 +274,6 @@ class PhaseBPractice:
             result = self.run_round(current_pairs, round_num=r, output_dir=round_output)
             rounds.append(result)
 
-            # Next round: only re-attempt still-failing kernels
             current_pairs = result.pop("_still_failing_pairs", [])
 
             if not current_pairs:
