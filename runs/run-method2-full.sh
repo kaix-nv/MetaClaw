@@ -28,20 +28,31 @@ else
   pip install openai 2>&1 | tail -3
 fi
 
-# Load Docker image for KernelTester
-IMAGE_NAME="local/compute-eval-python:13.1.0"
-IMAGE_TAR="$WORKDIR/runs/compute-eval-python-13.1.0.tar"
-if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  if [[ -f "$IMAGE_TAR" ]]; then
-    echo "Loading Docker image..."
-    docker load -i "$IMAGE_TAR"
+# Load TileGym Docker image for KernelTester (Phase B)
+TILEGYM_IMAGE="local/compute-eval-tilegym:13.1.0"
+TILEGYM_TAR="$WORKDIR/runs/compute-eval-tilegym-13.1.0.tar"
+if ! docker image inspect "$TILEGYM_IMAGE" &>/dev/null; then
+  if [[ -f "$TILEGYM_TAR" ]]; then
+    echo "Loading TileGym Docker image..."
+    docker load -i "$TILEGYM_TAR"
   else
-    echo "Building Docker image..."
-    cd "$CE_DIR"
-    docker build -f docker/Dockerfile.python-cuda13 -t "$IMAGE_NAME" .
+    echo "ERROR: TileGym Docker image not found. Build it first:"
+    echo "  docker build -f eval/cutile/Dockerfile.tilegym -t $TILEGYM_IMAGE ."
+    echo "  docker save $TILEGYM_IMAGE -o $TILEGYM_TAR"
+    exit 1
   fi
 fi
-echo "Docker image ready: $IMAGE_NAME"
+echo "TileGym Docker image ready: $TILEGYM_IMAGE"
+
+# Load compute-eval Docker image (Phase C evaluation)
+CE_IMAGE="local/compute-eval-python:13.1.0"
+CE_TAR="$WORKDIR/runs/compute-eval-python-13.1.0.tar"
+if ! docker image inspect "$CE_IMAGE" &>/dev/null; then
+  if [[ -f "$CE_TAR" ]]; then
+    echo "Loading compute-eval Docker image..."
+    docker load -i "$CE_TAR"
+  fi
+fi
 
 cd "$WORKDIR"
 

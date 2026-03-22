@@ -1,6 +1,9 @@
 # Extends compute-eval-python:13.1.0 with TileGym pre-installed
 FROM local/compute-eval-python:13.1.0
 
+# Install git (needed for TileGym's cuda-tile-experimental dependency)
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
 # Copy TileGym source and install
 COPY TileGym /opt/tilegym
 RUN uv pip install --python /opt/base-venv/bin/python -e /opt/tilegym

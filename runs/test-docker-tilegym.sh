@@ -38,21 +38,24 @@ print(f'cuTile: OK')
 "
 
 echo ""
-echo "=== Test 3: Run softmax test with ORIGINAL kernel ==="
+echo "=== Test 3: Run softmax test ==="
 docker run --rm --gpus all \
   -e CUDA_TILE_CACHE_DIR=/tmp/cutile-cache \
   "$IMAGE_NAME" \
   python -m pytest /opt/tilegym/tests/ops/test_softmax.py \
-    -k "use_chunked_False and use_tma_False and 256-256-float32" \
-    -x -v -p no:cacheprovider 2>&1 | tail -20
+    -x -v -p no:cacheprovider --quick-run
+SOFTMAX_EXIT=$?
+echo "Softmax exit code: $SOFTMAX_EXIT"
 
 echo ""
-echo "=== Test 4: Run matmul test with ORIGINAL kernel ==="
+echo "=== Test 4: Run matmul test ==="
 docker run --rm --gpus all \
   -e CUDA_TILE_CACHE_DIR=/tmp/cutile-cache \
   "$IMAGE_NAME" \
   python -m pytest /opt/tilegym/tests/ops/test_matmul.py \
-    -x --quick-run -v -p no:cacheprovider 2>&1 | tail -20
+    -x -v -p no:cacheprovider --quick-run
+MATMUL_EXIT=$?
+echo "Matmul exit code: $MATMUL_EXIT"
 
 echo ""
 echo "=== All tests done ==="
