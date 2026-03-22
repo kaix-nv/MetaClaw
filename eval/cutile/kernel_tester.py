@@ -1,7 +1,7 @@
 """Test a kernel implementation against TileGym test suite using Docker.
 
-Replaces a kernel file in TileGym, runs pytest inside the compute-eval
-Docker container, and reports pass/fail. Restores the original after testing.
+Uses a Docker image with TileGym pre-installed. Replaces a kernel file,
+runs pytest inside the container, and reports pass/fail.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE = "local/compute-eval-python:13.1.0"
+_DEFAULT_IMAGE = "local/compute-eval-tilegym:13.1.0"
 
 
 class KernelTester:
@@ -26,7 +26,7 @@ class KernelTester:
         self._test_dir = self._tilegym_dir / "tests" / "ops"
         self._docker_image = docker_image
 
-    def test_kernel(self, kernel_name: str, solution_code: str, timeout: int = 120) -> dict:
+    def test_kernel(self, kernel_name: str, solution_code: str, timeout: int = 180) -> dict:
         """Replace kernel, run pytest in Docker, restore original.
 
         Returns {passed, output, kernel_name}.
@@ -47,22 +47,23 @@ class KernelTester:
             # Write agent's solution
             kernel_file.write_text(solution_code, encoding="utf-8")
 
-            # Run pytest inside Docker container
+            # Run pytest inside Docker
+            # Mount only the kernel file (not whole TileGym — it's pre-installed in image)
             result = subprocess.run(
                 [
                     "docker", "run", "--rm",
                     "--gpus", "all",
-                    "-v", f"{self._tilegym_dir}:/workspace/tilegym:rw",
-                    "-w", "/workspace/tilegym",
+                    # Mount the modified kernel file over the installed one
+                    "-v", f"{kernel_file}:/opt/tilegym/src/tilegym/ops/cutile/{kernel_name}.py:ro",
                     "-e", "CUDA_TILE_CACHE_DIR=/tmp/cutile-cache",
                     self._docker_image,
-                    "bash", "-c",
-                    f"pip install -e . -q 2>/dev/null && "
-                    f"python -m pytest tests/ops/test_{kernel_name}.py -x --quick-run -v 2>&1"
+                    "python", "-m", "pytest",
+                    f"/opt/tilegym/tests/ops/test_{kernel_name}.py",
+                    "-x", "--quick-run", "-v", "-p", "no:cacheprovider",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=timeout + 60,  # extra buffer for Docker startup
+                timeout=timeout + 60,
             )
 
             passed = result.returncode == 0

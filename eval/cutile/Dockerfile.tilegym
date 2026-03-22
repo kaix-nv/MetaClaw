@@ -1,0 +1,9 @@
+# Extends compute-eval-python:13.1.0 with TileGym pre-installed
+FROM local/compute-eval-python:13.1.0
+
+# Copy TileGym source and install
+COPY TileGym /opt/tilegym
+RUN uv pip install --python /opt/base-venv/bin/python -e /opt/tilegym
+
+# Set cuTile cache to tmp to avoid permission issues
+ENV CUDA_TILE_CACHE_DIR=/tmp/cutile-cache
