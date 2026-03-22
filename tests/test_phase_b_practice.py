@@ -56,8 +56,8 @@ def test_single_round(skill_dir):
     }]
     result = practice.run_round(pairs, round_num=1)
     assert "num_attempted" in result
-    assert "num_correct" in result
-    assert "num_corrections" in result
+    assert "num_fixed" in result
+    assert "num_still_failing" in result
 
 
 def test_full_run_respects_rounds(skill_dir):
