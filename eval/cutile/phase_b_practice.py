@@ -171,26 +171,42 @@ class PhaseBPractice:
                 })
                 continue
 
-            # Step 2: Re-attempt with reference code visible
-            fixed_attempt = self.solve_kernel_with_hint(
-                pair["test_source"], pair["kernel_source"], active_skills
-            )
-            re_result = self._correction_sim.compare(
-                agent_solution=fixed_attempt,
-                reference=pair["kernel_source"],
-                kernel_name=pair["kernel_name"],
-            )
+            # Step 2: Re-attempt with reference code (up to max_retries)
+            max_retries = 3
+            fixed = False
+            latest_attempt = first_attempt
 
-            if re_result["is_correct"]:
+            for retry in range(1, max_retries + 1):
+                fixed_attempt = self.solve_kernel_with_hint(
+                    pair["test_source"], pair["kernel_source"], active_skills
+                )
+                re_result = self._correction_sim.compare(
+                    agent_solution=fixed_attempt,
+                    reference=pair["kernel_source"],
+                    kernel_name=pair["kernel_name"],
+                )
+
+                if re_result["is_correct"]:
+                    fixed = True
+                    latest_attempt = fixed_attempt
+                    break
+                else:
+                    logger.info(
+                        "[PhaseB] %s retry %d/%d still failing",
+                        pair["kernel_name"], retry, max_retries,
+                    )
+                    latest_attempt = fixed_attempt
+
+            if fixed:
                 # SUCCESS: Learn from what the fix did right
-                diff_message = self.generate_diff_skill(first_attempt, fixed_attempt)
+                diff_message = self.generate_diff_skill(first_attempt, latest_attempt)
 
                 # Feed the positive teaching note through conversation pipeline
                 turn_data = {
                     "session_id": f"phase-b-round{round_num}-{pair['kernel_name']}",
                     "turn_num": 1,
                     "user_message": diff_message,
-                    "assistant_response": fixed_attempt[:500],
+                    "assistant_response": latest_attempt[:500],
                     "active_skills": active_skills,
                 }
                 signals = self._detector.detect(turn_data)
@@ -202,7 +218,7 @@ class PhaseBPractice:
                 attempts.append({
                     "kernel": pair["kernel_name"],
                     "status": "fixed",
-                    "solution_preview": fixed_attempt[:200],
+                    "solution_preview": latest_attempt[:200],
                 })
                 fixes.append({
                     "kernel": pair["kernel_name"],
@@ -210,7 +226,7 @@ class PhaseBPractice:
                     "diff_skill": diff_message,
                 })
             else:
-                # Still failing: do NOT learn from this
+                # Still failing after all retries: do NOT learn
                 attempts.append({
                     "kernel": pair["kernel_name"],
                     "status": "still_failing",
