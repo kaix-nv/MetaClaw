@@ -75,6 +75,13 @@ class IterativeSolver:
         if tests_init.exists():
             (test_dir / "__init__.py").write_text(tests_init.read_text(), encoding="utf-8")
 
+        # Copy skill dir into workspace so it's available inside the container
+        import shutil
+        skill_dest = workspace_dir / ".opencode" / "skill" / "cutile-python"
+        if skill_dest.exists():
+            shutil.rmtree(skill_dest)
+        shutil.copytree(self._skill_dir, skill_dest)
+
     def solve_kernel(
         self,
         kernel_name: str,
@@ -117,7 +124,6 @@ class IterativeSolver:
                     "docker", "run", "--rm",
                     "--gpus", "all",
                     "-v", f"{workspace}:/testbed:rw",
-                    "-v", f"{self._skill_dir}:/testbed/.opencode/skill/cutile-python:ro",
                     "-e", f"OPENCODE_CONFIG_CONTENT={opencode_config}",
                     "-e", f"OPENAI_API_KEY={os.environ.get('API_KEY', os.environ.get('OPENAI_API_KEY', ''))}",
                     "-e", "CUDA_TILE_CACHE_DIR=/tmp/cutile-cache",
