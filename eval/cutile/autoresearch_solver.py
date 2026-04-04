@@ -27,7 +27,7 @@ class AutoresearchSolver:
         skill_dir: str,
         opencode_image: str = _DEFAULT_OPENCODE_IMAGE,
         timeout: int = 600,
-        model: str = "nvidia/aws/anthropic/bedrock-claude-opus-4-6",
+        model: str = "nvinference/aws/anthropic/bedrock-claude-opus-4-6",
     ):
         self._loader = TileGymLoader(tilegym_dir)
         self._tilegym_dir = Path(tilegym_dir).resolve()
@@ -86,39 +86,19 @@ class AutoresearchSolver:
         workspace = output_dir / "workspaces" / kernel_name
         self._create_workspace(kernel_name, workspace)
 
-        # Build OpenCode config
-        opencode_config = json.dumps({
-            "model": self._model,
-            "small_model": self._model,
-            "provider": {
-                "nvidia": {
-                    "name": "nvidia",
-                    "npm": "@ai-sdk/openai-compatible",
-                    "models": {
-                        "aws/anthropic/bedrock-claude-opus-4-6": {
-                            "name": self._model,
-                            "id": "aws/anthropic/bedrock-claude-opus-4-6",
-                        }
-                    },
-                    "options": {
-                        "apiKey": os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", "")),
-                        "baseURL": "https://inference-api.nvidia.com/v1",
-                    },
-                }
-            },
-        }, separators=(",", ":"))
-
         # Launch OpenCode in Docker
+        # The image's entrypoint injects API key into opencode.json config
+        # and starts the thinking proxy. The built-in config has 'nvinference'
+        # provider with Claude Opus 4.6 already registered.
+        api_key = os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", ""))
         try:
             result = subprocess.run(
                 [
                     "docker", "run", "--rm",
                     "--gpus", "all",
                     "-v", f"{workspace}:/testbed:rw",
-                    "-e", f"OPENCODE_CONFIG_CONTENT={opencode_config}",
-                    "-e", f"OPENAI_API_KEY={os.environ.get('API_KEY', os.environ.get('OPENAI_API_KEY', ''))}",
+                    "-e", f"OPENAI_API_KEY={api_key}",
                     "-e", "CUDA_TILE_CACHE_DIR=/tmp/cutile-cache",
-                    "-e", "SKIP_THINKING_PROXY=1",
                     "-e", "XDG_DATA_HOME=/tmp/xdg-data",
                     "-e", "XDG_CONFIG_HOME=/tmp/xdg-config",
                     "-e", "XDG_STATE_HOME=/tmp/xdg-state",
