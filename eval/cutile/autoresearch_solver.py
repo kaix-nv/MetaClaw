@@ -80,6 +80,7 @@ class AutoresearchSolver:
         skill_dest = workspace_dir / ".opencode" / "skill" / "cutile-python"
         shutil.copytree(self._skill_dir, skill_dest)
         opencode_dir = workspace_dir / ".opencode"
+        os.chmod(opencode_dir, 0o777)
         for root, dirs, files in os.walk(opencode_dir):
             for d in dirs:
                 os.chmod(os.path.join(root, d), 0o777)
