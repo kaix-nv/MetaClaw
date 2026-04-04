@@ -75,8 +75,16 @@ class AutoresearchSolver:
             (tests_pkg / "__init__.py").write_text("", encoding="utf-8")
 
         # 4. Copy skill dir into workspace
+        # OpenCode writes runtime files (package.json etc) to .opencode/
+        # so the entire directory must be writable
         skill_dest = workspace_dir / ".opencode" / "skill" / "cutile-python"
         shutil.copytree(self._skill_dir, skill_dest)
+        opencode_dir = workspace_dir / ".opencode"
+        for root, dirs, files in os.walk(opencode_dir):
+            for d in dirs:
+                os.chmod(os.path.join(root, d), 0o777)
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o666)
 
         # 5. Create empty results.log
         (workspace_dir / "results.log").write_text("", encoding="utf-8")
