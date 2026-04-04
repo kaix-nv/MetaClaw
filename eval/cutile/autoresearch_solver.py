@@ -106,7 +106,6 @@ class AutoresearchSolver:
                     self._opencode_image,
                     "opencode", "run",
                     "-m", self._model,
-                    "--dir", "/testbed",
                     "Follow the instructions in program.md",
                 ],
                 capture_output=True,
