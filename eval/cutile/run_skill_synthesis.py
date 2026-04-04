@@ -43,7 +43,7 @@ def main():
             tilegym_dir=args.tilegym_dir,
             skill_dir=skill_dir,
             timeout=args.timeout,
-            model=f"nvidia/{args.model}",
+            model=f"nvinference/{args.model}",
         )
         solve_results = solver.solve_all(str(results_dir / "solve"))
         solved = sum(1 for r in solve_results if r["passed"])
