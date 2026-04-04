@@ -40,8 +40,20 @@ class AutoresearchSolver:
     def _create_workspace(self, kernel_name: str, workspace_dir: Path) -> None:
         """Create a solve workspace with program.md, problem spec, test, and skill."""
         if workspace_dir.exists():
-            shutil.rmtree(workspace_dir)
-        workspace_dir.mkdir(parents=True)
+            # Docker creates root-owned files that host user can't delete.
+            # Use a Docker container to clean up as root.
+            subprocess.run(
+                ["docker", "run", "--rm", "-v", f"{workspace_dir.parent}:/cleanup",
+                 "alpine", "rm", "-rf", f"/cleanup/{workspace_dir.name}"],
+                capture_output=True, timeout=30,
+            )
+            # Fallback if Docker cleanup fails
+            if workspace_dir.exists():
+                try:
+                    shutil.rmtree(workspace_dir)
+                except PermissionError:
+                    logger.warning("[AutoSolver] Could not clean %s, skipping", workspace_dir)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. Copy program.md
         shutil.copy2(_PROGRAM_MD, workspace_dir / "program.md")

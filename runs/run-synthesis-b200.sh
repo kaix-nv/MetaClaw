@@ -28,8 +28,10 @@ echo "TileGym: $TILEGYM"
 echo "Base skill: $BASE_SKILL"
 echo "Results: $RESULTS"
 
-# Clean previous results
-rm -rf "$RESULTS"
+# Clean previous results (Docker creates root-owned files)
+docker run --rm -v "$RESULTS:/cleanup" alpine rm -rf /cleanup 2>/dev/null || true
+rm -rf "$RESULTS" 2>/dev/null || true
+mkdir -p "$RESULTS"
 
 # Install openai if needed
 pip install openai 2>/dev/null || true
