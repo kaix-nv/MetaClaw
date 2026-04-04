@@ -114,7 +114,6 @@ class AutoresearchSolver:
                 [
                     "docker", "run", "--rm",
                     "--gpus", "all",
-                    "--entrypoint", "",
                     "-v", f"{workspace}:/testbed:rw",
                     "-e", f"OPENCODE_CONFIG_CONTENT={opencode_config}",
                     "-e", f"OPENAI_API_KEY={os.environ.get('API_KEY', os.environ.get('OPENAI_API_KEY', ''))}",
